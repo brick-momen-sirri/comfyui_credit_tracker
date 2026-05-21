@@ -37,8 +37,8 @@ STATUS_PATH = Path(__file__).resolve().parent / "tracker_status.json"
 API_NODE_CATALOG_PATH = Path(__file__).resolve().parent / "api_node_catalog.json"
 COMFY_API_NODES_DIR = Path(__file__).resolve().parents[2] / "comfy_api_nodes"
 API_NODE_CATALOG_CACHE: dict[str, dict[str, Any]] | None = None
-BRICK_SAVER_CLASS_TYPES = {"SaveArchVizImage", "SaveArchVizSequence"}
-BRICK_SAVER_DISPLAY_NAMES = {"Save Brick Image", "Save Brick Sequence"}
+BRICK_SAVER_CLASS_TYPES = {"SaveArchVizImage", "SaveArchVizSequence", "SaveArchVizVideo"}
+BRICK_SAVER_DISPLAY_NAMES = {"Save Brick Image", "Save Brick Sequence", "Save Brick Video"}
 BRICK_SAVER_DEFAULT_PROJECT = "0000_base"
 
 QUANTITY_KEYS = (
@@ -745,6 +745,13 @@ def _unique_text(values: list[str]) -> list[str]:
     return unique
 
 
+def _preferred_brick_project(projects: list[str]) -> str:
+    for project in projects:
+        if project.casefold() != BRICK_SAVER_DEFAULT_PROJECT.casefold():
+            return project
+    return projects[0] if projects else ""
+
+
 def _brick_projects_from_prompt(prompt: dict[str, Any], title_map: dict[str, str] | None = None) -> list[str]:
     title_map = title_map or {}
     projects: list[str] = []
@@ -856,7 +863,7 @@ def _metadata_from_json(json_data: dict[str, Any]) -> dict[str, str]:
         tracker_meta.get("project"),
         default="",
     )
-    project_name = explicit_project or (brick_projects[0] if brick_projects else "General")
+    project_name = explicit_project or (_preferred_brick_project(brick_projects) if brick_projects else "General")
 
     return {
         "project_name": project_name,

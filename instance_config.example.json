@@ -1,0 +1,5 @@
+﻿{
+  "name": "This ComfyUI",
+  "base_url": "http://127.0.0.1:8188",
+  "notes": "Local tracker instance name shown in the federated dashboard."
+}

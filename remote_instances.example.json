@@ -1,0 +1,8 @@
+﻿[
+  {
+    "name": "Render PC 01",
+    "base_url": "http://192.168.1.10:8188",
+    "enabled": true,
+    "notes": "Optional remote tracker instance for peer/network totals."
+  }
+]

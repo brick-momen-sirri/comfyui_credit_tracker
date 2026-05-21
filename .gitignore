@@ -1,0 +1,17 @@
+﻿# Runtime data
+usage_log.db
+usage_log*.db
+backups/
+__pycache__/
+*.py[cod]
+tracker_status.json
+instance_config.json
+remote_instances.json
+credit_usage_*.csv
+
+# Local/editor files
+.env
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

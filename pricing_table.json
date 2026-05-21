@@ -1,0 +1,90 @@
+{
+  "Nano Banana": {
+    "pricing_mode": "fixed_per_run",
+    "credits": 14.7,
+    "auto_detect_class_types": [
+      "GeminiImageNode",
+      "GeminiImage2Node",
+      "GeminiNanoBanana2"
+    ]
+  },
+  "Seedance 2.0": {
+    "pricing_mode": "per_second",
+    "credits_per_second": 20,
+    "auto_detect_class_types": [
+      "ByteDance2TextToVideoNode",
+      "ByteDance2FirstLastFrameNode",
+      "ByteDance2ReferenceNode"
+    ]
+  },
+  "Image API Example": {
+    "pricing_mode": "per_output",
+    "credits_per_output": 10,
+    "auto_detect_class_types": [
+      "ImageAPIExample"
+    ]
+  },
+  "Unknown Node": {
+    "pricing_mode": "manual",
+    "credits": 0
+  },
+  "Kling": {
+    "pricing_mode": "manual",
+    "credits": 0,
+    "auto_detect_class_types": [
+      "KlingTextToVideoNode",
+      "KlingOmniProTextToVideoNode",
+      "OmniProTextToVideoNode",
+      "KlingOmniProFirstLastFrameNode",
+      "OmniProFirstLastFrameNode",
+      "KlingOmniProImageToVideoNode",
+      "OmniProImageToVideoNode",
+      "KlingOmniProVideoToVideoNode",
+      "OmniProVideoToVideoNode",
+      "KlingOmniProEditVideoNode",
+      "OmniProEditVideoNode",
+      "KlingOmniProImageNode",
+      "OmniProImageNode",
+      "KlingImage2VideoNode",
+      "Kling Image(First Frame) to Video",
+      "Kling Image First Frame to Video",
+      "KlingCameraControlT2VNode",
+      "KlingCameraControlI2VNode",
+      "KlingStartEndFrameNode",
+      "KlingVideoExtendNode",
+      "KlingDualCharacterVideoEffectNode",
+      "KlingSingleImageVideoEffectNode",
+      "KlingLipSyncAudioToVideoNode",
+      "KlingLipSyncTextToVideoNode",
+      "KlingVirtualTryOnNode",
+      "KlingImageGenerationNode",
+      "KlingTextToVideoWithAudio",
+      "KlingImageToVideoWithAudio",
+      "KlingMotionControl",
+      "KlingVideoNode",
+      "KlingFirstLastFrameNode",
+      "Kling 3.0 First-Last-Frame to Video",
+      "Kling 2.6 Image(First Frame) to Video with Audio",
+      "KlingAvatarNode"
+    ]
+  },
+  "Veo": {
+    "pricing_mode": "manual",
+    "credits": 0,
+    "auto_detect_class_types": [
+      "VeoVideoGenerationNode",
+      "Veo3VideoGenerationNode",
+      "Veo3FirstLastFrameNode"
+    ]
+  },
+  "Runway": {
+    "pricing_mode": "manual",
+    "credits": 0,
+    "auto_detect_class_types": [
+      "RunwayImageToVideoNodeGen3a",
+      "RunwayImageToVideoNodeGen4",
+      "RunwayFirstLastFrameNode",
+      "RunwayTextToImageNode"
+    ]
+  }
+}

@@ -37,6 +37,7 @@ AUTO_TRACKING_ENABLED = True
 TRACK_UNMAPPED_RUNTIME_PRICE_NODES = True
 STATUS_PATH = Path(__file__).resolve().parent / "tracker_status.json"
 API_NODE_CATALOG_PATH = Path(__file__).resolve().parent / "api_node_catalog.json"
+INSTANCE_CONFIG_PATH = Path(__file__).resolve().parent / "instance_config.json"
 COMFY_ROOT_DIR = Path(__file__).resolve().parents[2]
 COMFY_API_NODES_DIR = COMFY_ROOT_DIR / "comfy_api_nodes"
 API_NODE_CATALOG_CACHE: dict[str, dict[str, Any]] | None = None
@@ -113,6 +114,18 @@ def _node_schema_id(node_cls: Any) -> str:
         pass
 
     return str(getattr(node_cls, "__name__", "") or node_cls)
+
+
+def _local_instance_name() -> str:
+    try:
+        data = json.loads(INSTANCE_CONFIG_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            name = str(data.get("name") or "").strip()
+            if name:
+                return name
+    except Exception:
+        pass
+    return "This ComfyUI"
 
 
 def _estimate_kling_video_usd(inputs: dict[str, Any]) -> float:
@@ -1255,7 +1268,8 @@ class AutomaticCreditTracker:
         notes = (
             "Auto-tracked from workflow execution; "
             f"prompt_id={prompt_id}; node_id={node_id}; "
-            f"class_type={detected['class_type']}; status={effective_status}"
+            f"class_type={detected['class_type']}; status={effective_status}; "
+            f"origin_instance={_local_instance_name()}"
             f"{_project_context_note(metadata)}"
         )
         if saved_result is not None:

@@ -689,6 +689,15 @@ def _usage_row_identity(row: dict[str, Any]) -> str:
 
 def _imported_from_instance(notes: Any) -> str:
     text = str(notes or "")
+    origin_marker = "origin_instance="
+    origin_start = text.find(origin_marker)
+    if origin_start >= 0:
+        origin_start += len(origin_marker)
+        origin_end = text.find(";", origin_start)
+        if origin_end < 0:
+            origin_end = len(text)
+        return text[origin_start:origin_end].strip()
+
     marker = "Imported from "
     start = text.find(marker)
     if start < 0:
@@ -701,8 +710,12 @@ def _imported_from_instance(notes: Any) -> str:
 
 
 def _with_instance_name(row: dict[str, Any], fallback_instance: str) -> dict[str, Any]:
-    origin_instance = _imported_from_instance(row.get("notes")) or str(row.get("instance_name") or "").strip() or fallback_instance
-    return {**row, "instance_name": origin_instance}
+    explicit_origin = _imported_from_instance(row.get("notes")) or str(row.get("instance_name") or "").strip()
+    return {
+        **row,
+        "instance_name": explicit_origin or fallback_instance,
+        "origin_known": bool(explicit_origin),
+    }
 
 
 def _dedupe_usage_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -710,6 +723,33 @@ def _dedupe_usage_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
         unique.setdefault(_usage_row_identity(row), row)
     return list(unique.values())
+
+
+def _instance_unique_totals(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        name = (
+            str(row.get("instance_name") or "").strip()
+            if row.get("origin_known")
+            else "Origin unknown / copied DB"
+        )
+        if not name:
+            name = "Unknown"
+        target = grouped.setdefault(
+            name,
+            {
+                "unique_runs": 0,
+                "unique_credits": 0.0,
+                "unique_usd": 0.0,
+            },
+        )
+        target["unique_runs"] += 1
+        target["unique_credits"] += _safe_float(row.get("estimated_credits"), 0.0)
+        target["unique_usd"] += _safe_float(row.get("estimated_usd"), 0.0)
+    for row in grouped.values():
+        row["unique_credits"] = round(row["unique_credits"], 4)
+        row["unique_usd"] = round(row["unique_usd"], 4)
+    return grouped
 
 
 def _usage_totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -822,6 +862,34 @@ def _federated_payload(local_payload: dict[str, Any], params: dict[str, str], li
     deduped_usage_rows = _dedupe_usage_rows(all_usage_rows)
     combined_totals = _usage_totals(deduped_usage_rows)
     recent_rows = sorted(deduped_usage_rows, key=lambda row: str(row.get("timestamp") or ""), reverse=True)[:limit]
+    unique_by_instance = _instance_unique_totals(deduped_usage_rows)
+    for row in instance_rows:
+        unique = unique_by_instance.get(str(row.get("name") or ""), {})
+        row["raw_runs"] = row.get("runs", 0)
+        row["raw_credits"] = row.get("credits", 0.0)
+        row["raw_usd"] = row.get("usd", 0.0)
+        row["runs"] = int(_safe_float(unique.get("unique_runs"), 0.0))
+        row["credits"] = _safe_float(unique.get("unique_credits"), 0.0)
+        row["usd"] = _safe_float(unique.get("unique_usd"), 0.0)
+    known_instance_names = {str(row.get("name") or "") for row in instance_rows}
+    for name, unique in unique_by_instance.items():
+        if name in known_instance_names:
+            continue
+        instance_rows.append(
+            {
+                "name": name,
+                "base_url": "deduped rows without origin_instance",
+                "status": "review",
+                "ok": True,
+                "runs": int(_safe_float(unique.get("unique_runs"), 0.0)),
+                "credits": _safe_float(unique.get("unique_credits"), 0.0),
+                "usd": _safe_float(unique.get("unique_usd"), 0.0),
+                "raw_runs": 0,
+                "raw_credits": 0.0,
+                "raw_usd": 0.0,
+                "error": "",
+            }
+        )
 
     return {
         "config_path": str(REMOTE_INSTANCES_PATH.resolve()),
@@ -1955,11 +2023,11 @@ def _dashboard_html() -> str:
       document.getElementById("networkCredits").textContent = fmt.format(totals.total_estimated_credits || 0);
       document.getElementById("networkUsd").textContent = money.format(totals.total_estimated_usd || 0);
       status.classList.toggle("error", offline > 0);
-      status.innerHTML = `Network total: <strong>${fmt.format(totals.total_estimated_credits || 0)}</strong> credits / <strong>${money.format(totals.total_estimated_usd || 0)}</strong> across <strong>${fmt.format(online)}</strong> online instance(s). Deduped copied rows: <strong>${fmt.format(duplicates)}</strong>. Config: <code>${trunc(config, 90)}</code>`;
-      table("instances", ["Instance", "Status", "Runs", "Credits", "USD", "URL / Error"], federated?.instances || [], r => {
+      status.innerHTML = `Network total is deduped unique spend: <strong>${fmt.format(totals.total_estimated_credits || 0)}</strong> credits / <strong>${money.format(totals.total_estimated_usd || 0)}</strong> across <strong>${fmt.format(online)}</strong> online instance(s). Copied/synced duplicate rows ignored: <strong>${fmt.format(duplicates)}</strong>.`;
+      table("instances", ["Instance", "Status", "Unique Runs", "Unique USD", "Raw DB USD", "URL / Error"], federated?.instances || [], r => {
         const statusClass = esc(r.status || (r.ok ? "online" : "error")).toLowerCase();
         const detail = r.ok ? r.base_url : (r.error || r.base_url);
-        return `<tr><td>${trunc(r.name, 28)}</td><td><span class="badge ${statusClass}">${esc(r.status || (r.ok ? "online" : "error"))}</span></td><td class="num">${fmt.format(r.runs || 0)}</td><td class="num">${fmt.format(r.credits || 0)}</td><td class="num">${money.format(r.usd || 0)}</td><td>${trunc(detail, 56)}</td></tr>`;
+        return `<tr><td>${trunc(r.name, 28)}</td><td><span class="badge ${statusClass}">${esc(r.status || (r.ok ? "online" : "error"))}</span></td><td class="num">${fmt.format(r.runs || 0)}</td><td class="num">${money.format(r.usd || 0)}</td><td class="num">${money.format(r.raw_usd || 0)}</td><td>${trunc(detail, 56)}</td></tr>`;
       });
       table("networkNodes", ["Partner", "Runs", "Credits", "USD"], federated?.by_partner || [], r => `<tr><td>${trunc(r.partner_node_name, 34)}</td><td class="num">${fmt.format(r.total_runs)}</td><td class="num">${fmt.format(r.total_estimated_credits)}</td><td class="num">${money.format(r.total_estimated_usd)}</td></tr>`);
       const recentRows = federated?.recent || [];

@@ -1437,6 +1437,15 @@ def _dashboard_html() -> str:
     th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #edf1f6; vertical-align: top; overflow: visible; }
     th { color: #526177; font-size: 12px; text-transform: uppercase; }
     th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    #instances { table-layout: fixed; }
+    #instances th, #instances td { vertical-align: middle; }
+    #instances th:nth-child(1), #instances td:nth-child(1) { width: 18%; }
+    #instances th:nth-child(2), #instances td:nth-child(2) { width: 130px; }
+    #instances th:nth-child(3), #instances td:nth-child(3) { width: 130px; text-align: right; }
+    #instances th:nth-child(4), #instances td:nth-child(4),
+    #instances th:nth-child(5), #instances td:nth-child(5) { width: 140px; text-align: right; }
+    #instances th:nth-child(6), #instances td:nth-child(6) { width: auto; padding-left: 28px; }
+    #instances td:nth-child(6) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     code { font-family: Consolas, monospace; font-size: 12px; color: #526177; }
     .wide { grid-column: 1 / -1; }
     .chart { width: 100%; height: 240px; display: block; }

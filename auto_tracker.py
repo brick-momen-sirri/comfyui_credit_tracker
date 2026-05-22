@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import uuid
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 import re
 import shutil
@@ -45,6 +45,7 @@ BRICK_SAVER_DISPLAY_NAMES = {"Save Brick Image", "Save Brick Sequence", "Save Br
 BRICK_SAVER_DEFAULT_PROJECT = "0000_base"
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 NODE_RESULT_STATUSES = {"executed", "execution_success"}
+RESULT_CONFIRMATION_GRACE_SECONDS = 30
 
 QUANTITY_KEYS = (
     "quantity",
@@ -962,6 +963,78 @@ def _project_context_note(metadata: dict[str, str]) -> str:
     return ""
 
 
+def _parse_manifest_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _project_names_from_metadata(metadata: dict[str, str]) -> list[str]:
+    values = [metadata.get("project_name", "")]
+    values.extend(part.strip() for part in metadata.get("project_names", "").split(","))
+    return _unique_text([_sanitize_brick_project_name(value) for value in values])
+
+
+def _expected_saved_asset_types(class_type: str) -> set[str]:
+    normalized = _normalize(class_type)
+    if "video" in normalized or normalized in {"klingfirstlastframenode", "klingstartendframenode"}:
+        return {"video", "sequence"}
+    if "image" in normalized or "banana" in normalized or "gemini" in normalized:
+        return {"image"}
+    return set()
+
+
+def _recent_brick_saver_result(
+    metadata: dict[str, str],
+    started_at: datetime | None,
+    class_type: str = "",
+    finished_at: datetime | None = None,
+) -> dict[str, Any] | None:
+    if started_at is None:
+        return None
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    started_at = started_at.astimezone(timezone.utc) - timedelta(seconds=RESULT_CONFIRMATION_GRACE_SECONDS)
+    finished_at = finished_at or datetime.now().astimezone()
+    if finished_at.tzinfo is None:
+        finished_at = finished_at.replace(tzinfo=timezone.utc)
+    finished_at = finished_at.astimezone(timezone.utc) + timedelta(seconds=RESULT_CONFIRMATION_GRACE_SECONDS)
+    expected_asset_types = _expected_saved_asset_types(class_type)
+
+    for project_name in _project_names_from_metadata(metadata):
+        manifest_path = COMFY_ROOT_DIR / "output" / "projects" / project_name / "metadata" / "manifest.jsonl"
+        if not manifest_path.exists():
+            continue
+        try:
+            lines = manifest_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            continue
+        for line in reversed(lines[-200:]):
+            try:
+                record = json.loads(line)
+            except Exception:
+                continue
+            timestamp = _parse_manifest_timestamp(record.get("timestamp_utc") or record.get("timestamp"))
+            if timestamp is None or timestamp < started_at or timestamp > finished_at:
+                continue
+            asset_type = str(record.get("asset_type") or "").casefold()
+            if expected_asset_types and asset_type not in expected_asset_types:
+                continue
+            file_path = Path(str(record.get("file_path") or ""))
+            if file_path.exists():
+                return record
+    return None
+
+
 def _metadata_from_json(json_data: dict[str, Any]) -> dict[str, str]:
     prompt = json_data.get("prompt")
     if not isinstance(prompt, dict):
@@ -1054,6 +1127,7 @@ class AutomaticCreditTracker:
             self.prompt_data[prompt_id] = {
                 "metadata": metadata,
                 "detected_nodes": detected_nodes,
+                "started_at": datetime.now().astimezone(),
             }
         if detected_nodes:
             LOGGER.info(
@@ -1163,6 +1237,15 @@ class AutomaticCreditTracker:
             return False
 
         metadata = stored["metadata"]
+        saved_result = None
+        if status not in NODE_RESULT_STATUSES:
+            saved_result = _recent_brick_saver_result(
+                metadata,
+                stored.get("started_at"),
+                str(detected["class_type"]),
+                datetime.now().astimezone(),
+            )
+        effective_status = "result_confirmed" if saved_result is not None else status
         duration_seconds = float(detected["duration_seconds"])
         if duration_seconds <= 0:
             start_time = self.node_start_times.get((prompt_id, node_id))
@@ -1172,9 +1255,15 @@ class AutomaticCreditTracker:
         notes = (
             "Auto-tracked from workflow execution; "
             f"prompt_id={prompt_id}; node_id={node_id}; "
-            f"class_type={detected['class_type']}; status={status}"
+            f"class_type={detected['class_type']}; status={effective_status}"
             f"{_project_context_note(metadata)}"
         )
+        if saved_result is not None:
+            notes += (
+                "; confirmed by Brick Saver output"
+                f"; saved_asset_type={saved_result.get('asset_type', '')}"
+                f"; saved_path={saved_result.get('file_path', '')}"
+            )
 
         try:
             runtime_credits = self.runtime_prices.get(key)
@@ -1209,7 +1298,7 @@ class AutomaticCreditTracker:
                 if has_dedupe_key(dedupe_key):
                     self.logged_nodes.add(key)
                     return False
-                if status not in NODE_RESULT_STATUSES:
+                if effective_status not in NODE_RESULT_STATUSES and effective_status != "result_confirmed":
                     record = log_credit_usage_with_estimate(
                         project_name=metadata["project_name"],
                         user_name=metadata["user_name"],
@@ -1236,7 +1325,7 @@ class AutomaticCreditTracker:
                         user_name=metadata["user_name"],
                         workflow_name=metadata["workflow_name"],
                         partner_node_name=detected["partner_name"],
-                        pricing_mode="price_badge_estimate",
+                        pricing_mode="result_confirmed_estimate" if effective_status == "result_confirmed" else "price_badge_estimate",
                         quantity=int(detected["quantity"]),
                         duration_seconds=duration_seconds,
                         resolution=str(detected["resolution"]),
@@ -1248,7 +1337,7 @@ class AutomaticCreditTracker:
                         node_title=str(detected.get("node_title", "")),
                         model_name=str(detected.get("model_name", "")),
                         input_summary=str(detected.get("input_summary", "")),
-                        source="prompt_scan_price_badge",
+                        source="prompt_scan_result_confirmed" if effective_status == "result_confirmed" else "prompt_scan_price_badge",
                         dedupe_key=dedupe_key,
                     )
                 else:
@@ -1267,7 +1356,7 @@ class AutomaticCreditTracker:
                         node_title=str(detected.get("node_title", "")),
                         model_name=str(detected.get("model_name", "")),
                         input_summary=str(detected.get("input_summary", "")),
-                        source="prompt_scan",
+                        source="prompt_scan_result_confirmed" if effective_status == "result_confirmed" else "prompt_scan",
                         dedupe_key=dedupe_key,
                     )
             self.logged_nodes.add(key)

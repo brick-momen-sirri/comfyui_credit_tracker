@@ -1208,7 +1208,28 @@ class AutomaticCreditTracker:
                 if has_dedupe_key(dedupe_key):
                     self.logged_nodes.add(key)
                     return False
-                if fallback_credits > 0:
+                if status != "execution_success":
+                    record = log_credit_usage_with_estimate(
+                        project_name=metadata["project_name"],
+                        user_name=metadata["user_name"],
+                        workflow_name=metadata["workflow_name"],
+                        partner_node_name=detected["partner_name"],
+                        pricing_mode="execution_error_unconfirmed",
+                        quantity=int(detected["quantity"]),
+                        duration_seconds=duration_seconds,
+                        resolution=str(detected["resolution"]),
+                        estimated_credits=0.0,
+                        notes=f"{notes}; excluded from spend estimate because execution did not complete",
+                        prompt_id=prompt_id,
+                        node_id=node_id,
+                        node_class_type=str(detected["class_type"]),
+                        node_title=str(detected.get("node_title", "")),
+                        model_name=str(detected.get("model_name", "")),
+                        input_summary=str(detected.get("input_summary", "")),
+                        source="prompt_scan_error",
+                        dedupe_key=dedupe_key,
+                    )
+                elif fallback_credits > 0:
                     record = log_credit_usage_with_estimate(
                         project_name=metadata["project_name"],
                         user_name=metadata["user_name"],

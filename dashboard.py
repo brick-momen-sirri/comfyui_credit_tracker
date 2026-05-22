@@ -93,6 +93,7 @@ def _query_filters(params: dict[str, str]) -> tuple[str, list[Any]]:
     days = params.get("days", "").strip()
     date_from = params.get("from", "").strip()
     date_to = params.get("to", "").strip()
+    include_failed = params.get("include_failed", "").strip() == "1"
 
     if project:
         clauses.append("project_name LIKE ?")
@@ -116,6 +117,14 @@ def _query_filters(params: dict[str, str]) -> tuple[str, list[Any]]:
             values.append(f"-{days_int} days")
         except ValueError:
             pass
+    if not include_failed:
+        clauses.append(
+            "("
+            "source = 'runtime_price' "
+            "OR notes LIKE '%status=execution_success%' "
+            "OR notes NOT LIKE '%status=execution_error%'"
+            ")"
+        )
 
     if not clauses:
         return "", values

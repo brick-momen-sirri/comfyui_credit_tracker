@@ -719,9 +719,31 @@ def _with_instance_name(row: dict[str, Any], fallback_instance: str) -> dict[str
 
 
 def _dedupe_usage_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    identity_counts: dict[str, int] = {}
+    for row in rows:
+        identity = _usage_row_identity(row)
+        identity_counts[identity] = identity_counts.get(identity, 0) + 1
+
     unique: dict[str, dict[str, Any]] = {}
     for row in rows:
-        unique.setdefault(_usage_row_identity(row), row)
+        identity = _usage_row_identity(row)
+        if identity in unique:
+            continue
+        selected = dict(row)
+        selected["_identity_count"] = identity_counts.get(identity, 1)
+
+        # Older tracker builds did not stamp origin_instance on direct runtime-price
+        # rows. If the row exists on only one database, it is not a copied duplicate,
+        # so attribute it to the database it came from. Duplicated un-stamped rows
+        # still stay in the review bucket.
+        if (
+            not selected.get("origin_known")
+            and selected["_identity_count"] == 1
+            and str(selected.get("instance_name") or "").strip()
+        ):
+            selected["origin_known"] = True
+            selected["origin_inferred"] = True
+        unique[identity] = selected
     return list(unique.values())
 
 

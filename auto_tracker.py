@@ -1460,7 +1460,8 @@ class AutomaticCreditTracker:
 
         notes = (
             "Auto-tracked from ComfyUI API-node runtime price; "
-            f"prompt_id={prompt_id}; node_id={node_id}; class_type={class_type}"
+            f"prompt_id={prompt_id}; node_id={node_id}; class_type={class_type}; "
+            f"origin_instance={_local_instance_name()}"
             f"{_project_context_note(metadata)}"
         )
         source = "runtime_price" if _match_pricing_entry(class_type, load_pricing_table()) else "runtime_price_unmapped"

@@ -6,6 +6,8 @@ from collections import defaultdict
 from datetime import datetime
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -35,11 +37,13 @@ AUTO_TRACKING_ENABLED = True
 TRACK_UNMAPPED_RUNTIME_PRICE_NODES = True
 STATUS_PATH = Path(__file__).resolve().parent / "tracker_status.json"
 API_NODE_CATALOG_PATH = Path(__file__).resolve().parent / "api_node_catalog.json"
-COMFY_API_NODES_DIR = Path(__file__).resolve().parents[2] / "comfy_api_nodes"
+COMFY_ROOT_DIR = Path(__file__).resolve().parents[2]
+COMFY_API_NODES_DIR = COMFY_ROOT_DIR / "comfy_api_nodes"
 API_NODE_CATALOG_CACHE: dict[str, dict[str, Any]] | None = None
 BRICK_SAVER_CLASS_TYPES = {"SaveArchVizImage", "SaveArchVizSequence", "SaveArchVizVideo"}
 BRICK_SAVER_DISPLAY_NAMES = {"Save Brick Image", "Save Brick Sequence", "Save Brick Video"}
 BRICK_SAVER_DEFAULT_PROJECT = "0000_base"
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 
 QUANTITY_KEYS = (
     "quantity",
@@ -259,7 +263,11 @@ def _estimate_kling_avatar_usd(inputs: dict[str, Any]) -> float:
     return (0.056 if mode == "std" else 0.112) * duration
 
 
-def _estimate_price_badge_credits(class_type: str, inputs: dict[str, Any]) -> float:
+def _estimate_price_badge_credits(
+    class_type: str,
+    inputs: dict[str, Any],
+    prompt: dict[str, Any] | None = None,
+) -> float:
     normalized = _normalize(class_type)
     usd = 0.0
     if normalized in {"klingtexttovideonode", "klingstartendframenode"}:
@@ -277,9 +285,11 @@ def _estimate_price_badge_credits(class_type: str, inputs: dict[str, Any]) -> fl
         usd = (0.084 if resolution == "720p" else 0.112) * _kling_duration(inputs, 3.0)
     elif normalized == "klingomniproeditvideonode":
         duration = _duration_from_inputs(inputs, 0.0)
+        if duration <= 0 and prompt is not None:
+            duration = _infer_connected_video_duration(prompt, inputs)
         if duration > 0:
             resolution = _kling_resolution(inputs)
-            usd = (0.084 if resolution == "720p" else 0.112) * duration
+            usd = (0.126 if resolution == "720p" else 0.168) * duration
     elif normalized == "klingomniproimagenode":
         usd = _estimate_kling_omni_image_usd(inputs)
     elif normalized == "klingcameracontrolt2vnode":
@@ -551,6 +561,132 @@ def _duration_from_inputs(inputs: dict[str, Any], default: float = 0.0) -> float
     return max(0.0, _safe_float(value, default))
 
 
+def _media_duration_from_path(value: Any) -> float:
+    text = _scalar_text(value).strip()
+    if not text:
+        return 0.0
+
+    candidates: list[Path] = []
+    raw_path = Path(text)
+    if raw_path.suffix.casefold() not in VIDEO_EXTENSIONS:
+        return 0.0
+
+    if raw_path.is_absolute():
+        candidates.append(raw_path)
+    else:
+        candidates.extend(
+            [
+                COMFY_ROOT_DIR / "input" / raw_path,
+                COMFY_ROOT_DIR / "output" / raw_path,
+                COMFY_ROOT_DIR / "temp" / raw_path,
+            ]
+        )
+
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return 0.0
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if not resolved.exists():
+            continue
+        try:
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(resolved),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            continue
+        duration = _safe_float((result.stdout or "").strip(), 0.0)
+        if duration > 0:
+            return duration
+    return 0.0
+
+
+def _duration_from_media_inputs(inputs: dict[str, Any]) -> float:
+    for key in ("video", "reference_video", "filename", "file", "path", "video_path", "upload"):
+        duration = _media_duration_from_path(_input_value(inputs, (key,), ""))
+        if duration > 0:
+            return duration
+    return 0.0
+
+
+def _node_duration_from_prompt(
+    prompt: dict[str, Any],
+    node_id: str,
+    seen: set[str] | None = None,
+) -> float:
+    seen = seen or set()
+    if node_id in seen:
+        return 0.0
+    seen.add(node_id)
+
+    node_data = prompt.get(str(node_id))
+    if not isinstance(node_data, dict):
+        return 0.0
+    inputs = node_data.get("inputs", {})
+    if not isinstance(inputs, dict):
+        inputs = {}
+
+    explicit = _duration_from_inputs(inputs, 0.0)
+    if explicit > 0:
+        return explicit
+
+    class_type = str(node_data.get("class_type", ""))
+    normalized = _normalize(class_type)
+    if normalized == "klingvideonode":
+        duration = _kling_multishot_duration(inputs, 0.0)
+        if duration > 0:
+            return duration
+    if normalized in {
+        "klingfirstlastframenode",
+        "klingomniprotexttovideonode",
+        "klingomniprofirstlastframenode",
+        "klingomniproimagetovideonode",
+        "klingomniprovideotovideonode",
+    }:
+        duration = _kling_duration(inputs, 0.0)
+        if duration > 0:
+            return duration
+
+    media_duration = _duration_from_media_inputs(inputs)
+    if media_duration > 0:
+        return media_duration
+
+    for value in inputs.values():
+        if _is_connected_input(value):
+            duration = _node_duration_from_prompt(prompt, str(value[0]), seen)
+            if duration > 0:
+                return duration
+    return 0.0
+
+
+def _infer_connected_video_duration(prompt: dict[str, Any], inputs: dict[str, Any]) -> float:
+    for key in ("video", "reference_video"):
+        value = _input_value(inputs, (key,), None)
+        if _is_connected_input(value):
+            duration = _node_duration_from_prompt(prompt, str(value[0]), set())
+            if duration > 0:
+                return duration
+
+    return _duration_from_media_inputs(inputs)
+
+
 def _is_connected_input(value: Any) -> bool:
     return isinstance(value, (list, tuple)) and len(value) >= 2
 
@@ -691,7 +827,7 @@ def _find_partner_nodes(
             # display name.
             partner_name = str(catalog_entry.get("display_name") or partner_name)
 
-        fallback_credits = _estimate_price_badge_credits(class_type, inputs)
+        fallback_credits = _estimate_price_badge_credits(class_type, inputs, prompt)
         if fallback_credits <= 0:
             fallback_credits = _catalog_fallback_credits(catalog_entry, inputs)
 

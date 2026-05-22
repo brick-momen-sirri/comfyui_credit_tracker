@@ -913,12 +913,14 @@ def _federated_payload(local_payload: dict[str, Any], params: dict[str, str], li
             }
         )
 
+    real_instance_rows = [row for row in instance_rows if row.get("status") != "review"]
+
     return {
         "config_path": str(REMOTE_INSTANCES_PATH.resolve()),
         "instances": instance_rows,
-        "remote_count": max(0, len(instance_rows) - 1),
-        "online_count": sum(1 for row in instance_rows if row.get("ok")),
-        "offline_count": sum(1 for row in instance_rows if not row.get("ok")),
+        "remote_count": max(0, len(real_instance_rows) - 1),
+        "online_count": sum(1 for row in real_instance_rows if row.get("ok")),
+        "offline_count": sum(1 for row in real_instance_rows if not row.get("ok")),
         "raw_row_count": len(all_usage_rows),
         "deduped_row_count": len(deduped_usage_rows),
         "deduped_duplicate_count": max(0, len(all_usage_rows) - len(deduped_usage_rows)),

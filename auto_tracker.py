@@ -44,6 +44,7 @@ BRICK_SAVER_CLASS_TYPES = {"SaveArchVizImage", "SaveArchVizSequence", "SaveArchV
 BRICK_SAVER_DISPLAY_NAMES = {"Save Brick Image", "Save Brick Sequence", "Save Brick Video"}
 BRICK_SAVER_DEFAULT_PROJECT = "0000_base"
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
+NODE_RESULT_STATUSES = {"executed", "execution_success"}
 
 QUANTITY_KEYS = (
     "quantity",
@@ -1208,7 +1209,7 @@ class AutomaticCreditTracker:
                 if has_dedupe_key(dedupe_key):
                     self.logged_nodes.add(key)
                     return False
-                if status != "execution_success":
+                if status not in NODE_RESULT_STATUSES:
                     record = log_credit_usage_with_estimate(
                         project_name=metadata["project_name"],
                         user_name=metadata["user_name"],

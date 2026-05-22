@@ -316,8 +316,89 @@ def _tracker_status_payload() -> dict[str, Any]:
         return {"ok": False, "event": "error", "timestamp": "", "details": {}, "error": str(exc)}
 
 
-def _balance_reconciliation_payload(tracked_credits: float, tracked_usd: float) -> dict[str, Any]:
-    summary = balance_snapshot_summary(DB_PATH)
+def _balance_snapshot_summary_for_filters(params: dict[str, str]) -> dict[str, Any]:
+    clauses: list[str] = []
+    values: list[Any] = []
+    date_from = params.get("from", "").strip()
+    date_to = params.get("to", "").strip()
+    days = params.get("days", "").strip()
+
+    if date_from:
+        clauses.append("date(timestamp) >= date(?)")
+        values.append(date_from)
+    if date_to:
+        clauses.append("date(timestamp) <= date(?)")
+        values.append(date_to)
+    if days and not date_from and not date_to:
+        try:
+            days_int = max(1, min(int(days), 3650))
+            clauses.append("datetime(timestamp) >= datetime('now', ?)")
+            values.append(f"-{days_int} days")
+        except ValueError:
+            pass
+
+    if not clauses:
+        return balance_snapshot_summary(DB_PATH)
+
+    where_sql = "WHERE " + " AND ".join(clauses)
+    with _connect() as connection:
+        first = connection.execute(
+            f"""
+            SELECT *
+            FROM balance_snapshots
+            {where_sql}
+            ORDER BY timestamp ASC, id ASC
+            LIMIT 1
+            """,
+            values,
+        ).fetchone()
+        latest = connection.execute(
+            f"""
+            SELECT *
+            FROM balance_snapshots
+            {where_sql}
+            ORDER BY timestamp DESC, id DESC
+            LIMIT 1
+            """,
+            values,
+        ).fetchone()
+        count = connection.execute(
+            f"SELECT COUNT(*) FROM balance_snapshots {where_sql}",
+            values,
+        ).fetchone()[0]
+
+    if not first or not latest:
+        return {
+            "ok": False,
+            "snapshot_count": int(count or 0),
+            "message": "No balance snapshots for this date range",
+        }
+
+    first_credits = _safe_float(first["credits"], 0.0)
+    latest_credits = _safe_float(latest["credits"], 0.0)
+    first_usd = _safe_float(first["usd"], 0.0)
+    latest_usd = _safe_float(latest["usd"], 0.0)
+    delta_credits = round(first_credits - latest_credits, 4)
+    delta_usd = round(first_usd - latest_usd, 4)
+    return {
+        "ok": True,
+        "snapshot_count": int(count or 0),
+        "first": dict(first),
+        "latest": dict(latest),
+        "balance_delta_credits": delta_credits,
+        "balance_delta_usd": delta_usd,
+        "real_consumed_credits": max(delta_credits, 0.0),
+        "real_consumed_usd": max(delta_usd, 0.0),
+        "balance_increased": latest_credits > first_credits,
+    }
+
+
+def _balance_reconciliation_payload(
+    tracked_credits: float,
+    tracked_usd: float,
+    params: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    summary = _balance_snapshot_summary_for_filters(params or {})
     if not summary.get("ok"):
         summary.update(
             {
@@ -983,6 +1064,7 @@ def _summary_payload(params: dict[str, str]) -> dict[str, Any]:
     payload["balance_reconciliation"] = _balance_reconciliation_payload(
         _safe_float(tracked_totals.get("total_estimated_credits"), 0.0),
         _safe_float(tracked_totals.get("total_estimated_usd"), 0.0),
+        params,
     )
     payload["health"] = _system_health_payload(payload)
     return payload

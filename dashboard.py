@@ -1667,10 +1667,10 @@ def _dashboard_html() -> str:
         <label>From <input id="from" type="date"></label>
         <label>To <input id="to" type="date"></label>
       </div>
-      <label>Project <select id="project"><option value="">All projects</option></select></label>
-      <label>Partner Node <select id="partner"><option value="">All nodes</option></select></label>
-      <label>Source <select id="source"><option value="">All sources</option></select></label>
-      <label>Rows <input id="limit" type="number" min="1" max="200" value="20"></label>
+      <label>Project <select id="project" onchange="loadData()"><option value="">All projects</option></select></label>
+      <label>Partner Node <select id="partner" onchange="loadData()"><option value="">All nodes</option></select></label>
+      <label>Source <select id="source" onchange="loadData()"><option value="">All sources</option></select></label>
+      <label>Rows <input id="limit" type="number" min="1" max="200" value="20" onchange="loadData()"></label>
       <button class="refresh" onclick="loadData()">Refresh</button>
     </div>
   </header>

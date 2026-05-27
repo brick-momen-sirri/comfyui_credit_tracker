@@ -278,6 +278,43 @@ def _estimate_kling_avatar_usd(inputs: dict[str, Any]) -> float:
     return (0.056 if mode == "std" else 0.112) * duration
 
 
+def _estimate_veo_usd(class_type: str, inputs: dict[str, Any]) -> float:
+    normalized = _normalize(class_type)
+    duration = _duration_from_inputs(inputs, 0.0)
+    if duration <= 0:
+        return 0.0
+
+    if normalized == "veovideogenerationnode":
+        return 0.5 * duration
+
+    model = _scalar_text(_input_value(inputs, ("model", "model_name"), "")).casefold()
+    resolution = _scalar_text(_input_value(inputs, ("resolution",), "720p")).casefold()
+    default_audio = normalized == "veo3firstlastframenode"
+    generate_audio = _truthy(_input_value(inputs, ("generate_audio", "generateAudio"), default_audio))
+
+    if "lite" in model:
+        if resolution == "1080p":
+            per_second = 0.08 if generate_audio else 0.05
+        else:
+            per_second = 0.05 if generate_audio else 0.03
+    elif "fast" in model:
+        if resolution == "4k":
+            per_second = 0.30 if generate_audio else 0.25
+        elif resolution == "1080p":
+            per_second = 0.12 if generate_audio else 0.10
+        else:
+            per_second = 0.10 if generate_audio else 0.08
+    elif "3.0" in model:
+        per_second = 0.40 if generate_audio else 0.20
+    else:
+        if resolution == "4k":
+            per_second = 0.60 if generate_audio else 0.40
+        else:
+            per_second = 0.40 if generate_audio else 0.20
+
+    return per_second * duration
+
+
 def _estimate_price_badge_credits(
     class_type: str,
     inputs: dict[str, Any],
@@ -334,6 +371,8 @@ def _estimate_price_badge_credits(
         usd = _estimate_kling_v3_first_last_usd(inputs)
     elif normalized == "klingavatarnode":
         usd = _estimate_kling_avatar_usd(inputs)
+    elif normalized in {"veovideogenerationnode", "veo3videogenerationnode", "veo3firstlastframenode"}:
+        usd = _estimate_veo_usd(class_type, inputs)
 
     return round(max(0.0, usd) * CREDITS_PER_USD, 4)
 

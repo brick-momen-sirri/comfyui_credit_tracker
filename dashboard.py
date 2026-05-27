@@ -865,6 +865,53 @@ def _group_usage_rows(rows: list[dict[str, Any]], group_key: str, limit: int) ->
     )[:limit]
 
 
+def _model_label(row: dict[str, Any]) -> str:
+    for key in ("model_name", "node_title", "node_class_type"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return "Unknown Model"
+
+
+def _group_usage_rows_by_model(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        partner = str(row.get("partner_node_name") or "").strip() or "Unknown Partner"
+        model = _model_label(row)
+        key = (partner, model)
+        target = grouped.setdefault(
+            key,
+            {
+                "partner_node_name": partner,
+                "model_name": model,
+                "total_runs": 0,
+                "total_quantity": 0.0,
+                "total_duration_seconds": 0.0,
+                "total_estimated_credits": 0.0,
+                "total_estimated_usd": 0.0,
+                "avg_credits_per_run": 0.0,
+                "avg_usd_per_run": 0.0,
+            },
+        )
+        target["total_runs"] += 1
+        target["total_quantity"] += _safe_float(row.get("quantity"), 0.0)
+        target["total_duration_seconds"] += _safe_float(row.get("duration_seconds"), 0.0)
+        target["total_estimated_credits"] += _safe_float(row.get("estimated_credits"), 0.0)
+        target["total_estimated_usd"] += _safe_float(row.get("estimated_usd"), 0.0)
+
+    for row in grouped.values():
+        runs = max(1, int(row.get("total_runs") or 0))
+        row["avg_credits_per_run"] = round(_safe_float(row.get("total_estimated_credits"), 0.0) / runs, 4)
+        row["avg_usd_per_run"] = round(_safe_float(row.get("total_estimated_usd"), 0.0) / runs, 4)
+        for key in ("total_quantity", "total_duration_seconds", "total_estimated_credits", "total_estimated_usd"):
+            row[key] = round(_safe_float(row.get(key), 0.0), 4)
+
+    return sorted(
+        grouped.values(),
+        key=lambda row: (-_safe_float(row.get("total_estimated_credits"), 0.0), -int(row.get("total_runs") or 0), str(row.get("partner_node_name", "")), str(row.get("model_name", ""))),
+    )[:limit]
+
+
 def _federated_payload(local_payload: dict[str, Any], params: dict[str, str], limit: int) -> dict[str, Any]:
     local_name = _local_instance_name()
     local_totals = local_payload.get("totals") or {}
@@ -978,6 +1025,8 @@ def _federated_payload(local_payload: dict[str, Any], params: dict[str, str], li
         "totals": combined_totals,
         "by_partner": _group_usage_rows(deduped_usage_rows, "partner_node_name", limit),
         "by_project": _group_usage_rows(deduped_usage_rows, "project_name", limit),
+        "by_model": _group_usage_rows_by_model(deduped_usage_rows, limit),
+        "expensive": sorted(deduped_usage_rows, key=lambda row: (_safe_float(row.get("estimated_credits"), 0.0), str(row.get("timestamp") or "")), reverse=True)[:limit],
         "recent": recent_rows,
         "remotes": remote_payloads,
     }
@@ -1034,6 +1083,27 @@ def _summary_payload(params: dict[str, str]) -> dict[str, Any]:
             {where_sql}
             GROUP BY partner_node_name
             ORDER BY total_estimated_credits DESC, total_runs DESC, partner_node_name ASC
+            LIMIT ?
+            """,
+            [*values, limit],
+        ).fetchall()
+
+        by_model = connection.execute(
+            f"""
+            SELECT
+                partner_node_name,
+                COALESCE(NULLIF(model_name, ''), NULLIF(node_title, ''), NULLIF(node_class_type, ''), 'Unknown Model') AS model_name,
+                COUNT(*) AS total_runs,
+                ROUND(COALESCE(SUM(quantity), 0), 4) AS total_quantity,
+                ROUND(COALESCE(SUM(duration_seconds), 0), 4) AS total_duration_seconds,
+                ROUND(COALESCE(SUM(estimated_credits), 0), 4) AS total_estimated_credits,
+                ROUND(COALESCE(SUM(estimated_usd), 0), 4) AS total_estimated_usd,
+                ROUND(COALESCE(SUM(estimated_credits), 0) / MAX(COUNT(*), 1), 4) AS avg_credits_per_run,
+                ROUND(COALESCE(SUM(estimated_usd), 0) / MAX(COUNT(*), 1), 4) AS avg_usd_per_run
+            FROM credit_usage
+            {where_sql}
+            GROUP BY partner_node_name, COALESCE(NULLIF(model_name, ''), NULLIF(node_title, ''), NULLIF(node_class_type, ''), 'Unknown Model')
+            ORDER BY total_estimated_credits DESC, total_runs DESC, partner_node_name ASC, model_name ASC
             LIMIT ?
             """,
             [*values, limit],
@@ -1193,6 +1263,7 @@ def _summary_payload(params: dict[str, str]) -> dict[str, Any]:
         "totals": dict(totals),
         "by_node": _rows_to_dicts(by_node),
         "by_partner": _rows_to_dicts(by_partner),
+        "by_model": _rows_to_dicts(by_model),
         "by_project": _rows_to_dicts(by_project),
         "by_user": _rows_to_dicts(by_user),
         "by_workflow": _rows_to_dicts(by_workflow),
@@ -1480,6 +1551,20 @@ def _dashboard_html() -> str:
     .card.warning-card.active { background: #fff7ed; border-color: #fdba74; }
     .warning-icon { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; background: #e2e8f0; color: #64748b; font-weight: 900; margin-right: 8px; }
     .warning-card.active .warning-icon { background: #f59e0b; color: #fff; }
+    .project-overview { margin-bottom: 18px; overflow: hidden; }
+    .project-overview[hidden] { display: none; }
+    .project-summary { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 12px; padding: 18px; border-bottom: 1px solid #edf1f6; }
+    .project-metric { border: 1px solid #e2e8f0; border-radius: 7px; padding: 12px; background: #fbfdff; min-height: 78px; }
+    .project-metric span { display: block; color: #64748b; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }
+    .project-metric strong { display: block; font-size: 24px; line-height: 1.1; font-weight: 900; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .project-metric small { display: block; margin-top: 6px; color: #526177; font-size: 12px; overflow-wrap: anywhere; }
+    .project-body { display: grid; grid-template-columns: 1.15fr .85fr; gap: 18px; padding: 18px; }
+    .project-block { min-width: 0; }
+    .project-block h3 { margin: 0 0 10px; font-size: 15px; }
+    .project-highlights { display: grid; gap: 10px; margin-bottom: 18px; }
+    .project-highlight { display: grid; grid-template-columns: minmax(130px, .8fr) 1fr; gap: 12px; padding: 10px 0; border-bottom: 1px solid #edf1f6; }
+    .project-highlight span { color: #64748b; font-size: 12px; font-weight: 800; text-transform: uppercase; }
+    .project-highlight strong { overflow-wrap: anywhere; }
     .grid { grid-template-columns: 1fr 1fr; }
     section { overflow: visible; }
     section h2 { margin: 0; padding: 16px 18px; font-size: 18px; border-bottom: 1px solid #dbe3ef; }
@@ -1543,7 +1628,7 @@ def _dashboard_html() -> str:
     details.collapsible-section summary::after { content: "+"; float: right; color: #276fe0; font-weight: 900; }
     details.collapsible-section[open] summary { border-bottom-color: #dbe3ef; }
     details.collapsible-section[open] summary::after { content: "-"; }
-    @media (max-width: 1100px) { .header-row, .filter-bar, .cards, .grid, .share-layout, .reconcile, .health-grid { grid-template-columns: 1fr; display: grid; } .header-actions { justify-content: start; } .share-row { grid-template-columns: 14px minmax(120px, 1fr) 80px 90px; } .share-budget { display: none; } header { position: static; } }
+    @media (max-width: 1100px) { .header-row, .filter-bar, .cards, .grid, .share-layout, .reconcile, .health-grid, .project-summary, .project-body { grid-template-columns: 1fr; display: grid; } .header-actions { justify-content: start; } .share-row { grid-template-columns: 14px minmax(120px, 1fr) 80px 90px; } .share-budget { display: none; } header { position: static; } }
   </style>
 </head>
 <body>
@@ -1615,6 +1700,25 @@ def _dashboard_html() -> str:
         <div class="sub">Records needing review</div>
       </div>
     </div>
+    <section class="project-overview" id="projectOverview" hidden>
+      <div class="section-head">
+        <h2 id="projectOverviewTitle">Project Overview</h2>
+        <span class="badge online" id="projectOverviewBadge">Project</span>
+      </div>
+      <div class="project-summary" id="projectSummary"></div>
+      <div class="project-body">
+        <div class="project-block">
+          <h3>Spend By Model</h3>
+          <table id="projectModels"></table>
+        </div>
+        <div class="project-block">
+          <h3>Project Highlights</h3>
+          <div class="project-highlights" id="projectHighlights"></div>
+          <h3>Most Expensive Runs</h3>
+          <table id="projectExpensive"></table>
+        </div>
+      </div>
+    </section>
     <div class="grid">
       <section class="wide">
         <div class="section-head"><h2>System Health & Backups</h2><span class="badge" id="healthBadge">Checking</span></div>
@@ -1643,7 +1747,7 @@ def _dashboard_html() -> str:
     const money = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" });
     const dateFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
     const shareColors = ["#276fe0", "#1c9a8a", "#d24b63", "#8b6bd9", "#e58f2a", "#2f8ccf", "#5c7c2f", "#a95f37", "#64748b"];
-    const numericHeads = new Set(["Runs", "Credits", "USD", "Share", "Budget Used"]);
+    const numericHeads = new Set(["Runs", "Tasks", "Credits", "USD", "Share", "Budget Used", "Avg / Run"]);
     let lastDashboardData = null;
     let showAllRecent = false;
     let showAllNetworkRecent = false;
@@ -2121,6 +2225,50 @@ def _dashboard_html() -> str:
       recentButton.style.display = recentRows.length > 5 ? "inline-grid" : "none";
       table("networkRecent", ["Instance", "Time", "Partner", "Model", "Source", "Credits"], visibleRecent, r => `<tr><td>${trunc(r.instance_name, 24)}</td><td>${esc(r.timestamp)}</td><td>${trunc(r.partner_node_name, 26)}</td><td><code>${trunc(r.model_name || r.node_title || r.node_class_type, 24)}</code></td><td>${trunc(r.source, 18)}</td><td class="num">${fmt.format(r.estimated_credits)}</td></tr>`);
     }
+    function renderProjectOverview(data) {
+      const projectName = document.getElementById("project").value.trim();
+      const panel = document.getElementById("projectOverview");
+      if (!projectName) {
+        panel.hidden = true;
+        return;
+      }
+
+      panel.hidden = false;
+      const source = data.federated || data;
+      const totals = source.totals || data.totals || {};
+      const byModel = source.by_model || data.by_model || [];
+      const expensive = source.expensive || data.expensive || [];
+      const runs = Number(totals.total_runs || 0);
+      const credits = Number(totals.total_estimated_credits || 0);
+      const usd = Number(totals.total_estimated_usd || 0);
+      const avgUsd = runs > 0 ? usd / runs : 0;
+      const mostUsed = [...byModel].sort((a, b) => Number(b.total_runs || 0) - Number(a.total_runs || 0))[0];
+      const topSpend = [...byModel].sort((a, b) => Number(b.total_estimated_usd || 0) - Number(a.total_estimated_usd || 0))[0];
+      const highestAvg = [...byModel].sort((a, b) => Number(b.avg_usd_per_run || 0) - Number(a.avg_usd_per_run || 0))[0];
+
+      document.getElementById("projectOverviewTitle").textContent = `Project Overview: ${projectName}`;
+      document.getElementById("projectOverviewBadge").textContent = `${fmt.format(runs)} tasks`;
+      document.getElementById("projectSummary").innerHTML = `
+        <div class="project-metric"><span>Total AI Tasks</span><strong>${fmt.format(runs)}</strong><small>Partner/API node calls</small></div>
+        <div class="project-metric"><span>Credits Spent</span><strong>${fmt.format(credits)}</strong><small>${money.format(usd)}</small></div>
+        <div class="project-metric"><span>Average / Task</span><strong>${money.format(avgUsd)}</strong><small>${fmt.format(runs ? credits / runs : 0)} credits</small></div>
+        <div class="project-metric"><span>Most Used</span><strong>${trunc(mostUsed?.partner_node_name || "-", 22)}</strong><small>${fmt.format(mostUsed?.total_runs || 0)} runs</small></div>
+        <div class="project-metric"><span>Top Spend</span><strong>${trunc(topSpend?.partner_node_name || "-", 22)}</strong><small>${money.format(topSpend?.total_estimated_usd || 0)}</small></div>
+        <div class="project-metric"><span>Highest Avg</span><strong>${trunc(highestAvg?.partner_node_name || "-", 22)}</strong><small>${money.format(highestAvg?.avg_usd_per_run || 0)} / run</small></div>
+      `;
+
+      document.getElementById("projectHighlights").innerHTML = `
+        <div class="project-highlight"><span>Most Used Model</span><strong>${trunc(mostUsed ? `${mostUsed.partner_node_name} | ${mostUsed.model_name}` : "-", 46)}</strong></div>
+        <div class="project-highlight"><span>Most Expensive Total</span><strong>${trunc(topSpend ? `${topSpend.partner_node_name} | ${topSpend.model_name}` : "-", 46)} - ${money.format(topSpend?.total_estimated_usd || 0)}</strong></div>
+        <div class="project-highlight"><span>Highest Cost / Run</span><strong>${trunc(highestAvg ? `${highestAvg.partner_node_name} | ${highestAvg.model_name}` : "-", 46)} - ${money.format(highestAvg?.avg_usd_per_run || 0)}</strong></div>
+      `;
+
+      table("projectModels", ["Partner", "Model", "Runs", "Credits", "USD", "Avg / Run", "Share"], byModel, r => {
+        const share = credits > 0 ? (Number(r.total_estimated_credits || 0) / credits) * 100 : 0;
+        return `<tr><td>${trunc(r.partner_node_name, 28)}</td><td><code>${trunc(r.model_name, 24)}</code></td><td class="num">${fmt.format(r.total_runs)}</td><td class="num">${fmt.format(r.total_estimated_credits)}</td><td class="num">${money.format(r.total_estimated_usd)}</td><td class="num">${money.format(r.avg_usd_per_run || 0)}</td><td class="num">${fmt.format(share)}%</td></tr>`;
+      });
+      table("projectExpensive", ["Time", "Partner", "Model", "USD"], expensive.slice(0, 5), r => `<tr><td>${esc(r.timestamp)}</td><td>${trunc(r.partner_node_name, 22)}</td><td><code>${trunc(r.model_name || r.node_title || r.node_class_type, 22)}</code></td><td class="num">${money.format(r.estimated_usd || 0)}</td></tr>`);
+    }
     async function loadData() {
       const q = params();
       const response = await fetch(`/credit-tracker/api/summary?${q}`);
@@ -2148,6 +2296,7 @@ def _dashboard_html() -> str:
       renderBalanceReconciliation(data.balance_reconciliation || {});
       renderOfficialUsage(data.official_usage || {});
       renderFederated(data.federated || {});
+      renderProjectOverview(data);
       table("nodes", ["Partner", "Class", "Runs", "Credits", "USD"], data.by_node, r => `<tr><td>${trunc(r.partner_node_name, 28)}</td><td><code>${trunc(r.node_class_type, 22)}</code></td><td class="num">${fmt.format(r.total_runs)}</td><td class="num">${fmt.format(r.total_estimated_credits)}</td><td class="num">${money.format(r.total_estimated_usd)}</td></tr>`);
       table("projects", ["Project", "Runs", "Credits", "USD"], data.by_project, r => `<tr><td>${trunc(r.project_name, 28)}</td><td class="num">${fmt.format(r.total_runs)}</td><td class="num">${fmt.format(r.total_estimated_credits)}</td><td class="num">${money.format(r.total_estimated_usd)}</td></tr>`);
       table("users", ["User", "Runs", "Credits", "USD"], data.by_user, r => `<tr><td>${trunc(r.user_name, 28)}</td><td class="num">${fmt.format(r.total_runs)}</td><td class="num">${fmt.format(r.total_estimated_credits)}</td><td class="num">${money.format(r.total_estimated_usd)}</td></tr>`);

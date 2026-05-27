@@ -93,6 +93,8 @@ def _query_filters(params: dict[str, str]) -> tuple[str, list[Any]]:
     days = params.get("days", "").strip()
     date_from = params.get("from", "").strip()
     date_to = params.get("to", "").strip()
+    timestamp_from = params.get("from_ts", "").strip()
+    timestamp_to = params.get("to_ts", "").strip()
     include_failed = params.get("include_failed", "").strip() == "1"
 
     if project:
@@ -110,6 +112,12 @@ def _query_filters(params: dict[str, str]) -> tuple[str, list[Any]]:
     if date_to:
         clauses.append("date(timestamp) <= date(?)")
         values.append(date_to)
+    if timestamp_from:
+        clauses.append("timestamp >= ?")
+        values.append(timestamp_from)
+    if timestamp_to:
+        clauses.append("timestamp <= ?")
+        values.append(timestamp_to)
     if days and not date_from and not date_to:
         try:
             days_int = max(1, min(int(days), 3650))
@@ -409,6 +417,31 @@ def _balance_reconciliation_payload(
             }
         )
         return summary
+
+    first = summary.get("first") or {}
+    latest = summary.get("latest") or {}
+    first_ts = str(first.get("timestamp") or "").strip()
+    latest_ts = str(latest.get("timestamp") or "").strip()
+    if first_ts and latest_ts:
+        window_params = dict(params or {})
+        window_params.pop("days", None)
+        window_params.pop("from", None)
+        window_params.pop("to", None)
+        window_params["from_ts"] = first_ts
+        window_params["to_ts"] = latest_ts
+        window_params["limit"] = "10000"
+        window_payload = _usage_rows_payload(window_params)
+        window_rows = window_payload.get("rows", [])
+        if (params or {}).get("federated", "1") != "0":
+            local_window_payload = {"totals": _usage_totals(window_rows)}
+            tracked_totals = _federated_payload(local_window_payload, window_params, 10000).get("totals", {})
+        else:
+            tracked_totals = _usage_totals(window_rows)
+        tracked_credits = _safe_float(tracked_totals.get("total_estimated_credits"), 0.0)
+        tracked_usd = _safe_float(tracked_totals.get("total_estimated_usd"), 0.0)
+        summary["tracked_window_start"] = first_ts
+        summary["tracked_window_end"] = latest_ts
+        summary["tracked_window_note"] = "Tracked spend is compared only inside the balance snapshot window."
 
     real_credits = _safe_float(summary.get("real_consumed_credits"), 0.0)
     real_usd = _safe_float(summary.get("real_consumed_usd"), 0.0)
@@ -747,6 +780,23 @@ def _dedupe_usage_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(unique.values())
 
 
+def _filter_rows_by_timestamp_window(rows: list[dict[str, Any]], params: dict[str, str]) -> list[dict[str, Any]]:
+    timestamp_from = str(params.get("from_ts") or "").strip()
+    timestamp_to = str(params.get("to_ts") or "").strip()
+    if not timestamp_from and not timestamp_to:
+        return rows
+
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        timestamp = str(row.get("timestamp") or "").strip()
+        if timestamp_from and timestamp < timestamp_from:
+            continue
+        if timestamp_to and timestamp > timestamp_to:
+            continue
+        filtered.append(row)
+    return filtered
+
+
 def _instance_unique_totals(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -881,6 +931,7 @@ def _federated_payload(local_payload: dict[str, Any], params: dict[str, str], li
         )
         remote_payloads.append({"instance": instance_meta})
 
+    all_usage_rows = _filter_rows_by_timestamp_window(all_usage_rows, params)
     deduped_usage_rows = _dedupe_usage_rows(all_usage_rows)
     combined_totals = _usage_totals(deduped_usage_rows)
     recent_rows = sorted(deduped_usage_rows, key=lambda row: str(row.get("timestamp") or ""), reverse=True)[:limit]

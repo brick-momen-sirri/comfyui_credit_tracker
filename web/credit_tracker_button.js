@@ -1,8 +1,10 @@
-const { app } = window.comfyAPI?.app || {};
+import { app } from "../../scripts/app.js";
 
 const BUTTON_ID = "credit-tracker-toolbar-button";
 const BUTTON_CLASS = "credit-tracker-toolbar-button";
 const STYLE_ID = "credit-tracker-toolbar-style";
+const FLOATING_CLASS = "credit-tracker-floating";
+const TOOLBAR_CLASS = "credit-tracker-in-toolbar";
 
 function ensureStyle() {
   if (document.getElementById(STYLE_ID)) {
@@ -18,6 +20,7 @@ function ensureStyle() {
       justify-content: center;
       height: 36px;
       width: 36px;
+      min-width: 36px;
       padding: 0;
       border: 0;
       border-radius: 4px;
@@ -34,9 +37,24 @@ function ensureStyle() {
       transform: translateY(1px);
     }
     #${BUTTON_ID}.${BUTTON_CLASS} .credit-tracker-icon {
-      font-size: 16px;
-      line-height: 1;
-      opacity: 0.9;
+      display: block;
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: #f5f5f5;
+      box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.14), 0 0 10px rgba(255, 255, 255, 0.36);
+      opacity: 0.95;
+    }
+    #${BUTTON_ID}.${FLOATING_CLASS} {
+      position: fixed;
+      top: calc(var(--comfy-topbar-height, 48px) + 12px);
+      right: 18px;
+      z-index: 10000;
+    }
+    #${BUTTON_ID}.${TOOLBAR_CLASS} {
+      position: static;
+      flex: 0 0 auto;
+      margin: 0;
     }
   `;
   document.head.appendChild(style);
@@ -69,9 +87,37 @@ function findButtonByText(text, { contains = false } = {}) {
     });
 }
 
+function findButtonByAttributes(patterns) {
+  return [...document.querySelectorAll("button, .p-button, [role='button']")]
+    .filter(isVisible)
+    .find((element) => {
+      const values = [
+        element.id,
+        element.getAttribute("data-testid"),
+        element.getAttribute("aria-label"),
+        element.getAttribute("title"),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return patterns.some((pattern) => values.includes(pattern));
+    });
+}
+
+function directChildOf(parent, child) {
+  let current = child;
+  while (current?.parentElement && current.parentElement !== parent) {
+    current = current.parentElement;
+  }
+  return current?.parentElement === parent ? current : child;
+}
+
 function findToolbar() {
   const anchor =
+    findButtonByAttributes(["queue", "run", "monitor"]) ||
     findButtonByText("Monitor", { contains: true }) ||
+    findButtonByText("Queue", { contains: true }) ||
     findButtonByText("Run") ||
     [...document.querySelectorAll("[data-testid='queue-button'], #queue-button")].find(isVisible);
 
@@ -79,7 +125,9 @@ function findToolbar() {
     return null;
   }
 
-  const toolbarRow = anchor.closest(".flex.gap-2.mx-2");
+  const toolbarRow = anchor.closest(
+    ".flex.gap-2.mx-2, .flex.items-center, .p-toolbar, [role='toolbar'], [data-testid*='toolbar']"
+  );
   if (toolbarRow && isVisible(toolbarRow)) {
     return { toolbar: toolbarRow, anchor };
   }
@@ -110,7 +158,7 @@ function createButton() {
   button.type = "button";
   button.title = "Open ComfyUI Credit Tracker";
   button.setAttribute("aria-label", "Open ComfyUI Credit Tracker");
-  button.innerHTML = `<span class="credit-tracker-icon" aria-hidden="true">◈</span>`;
+  button.innerHTML = `<span class="credit-tracker-icon" aria-hidden="true"></span>`;
   button.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -120,24 +168,26 @@ function createButton() {
 }
 
 function insertButton() {
-  if (document.getElementById(BUTTON_ID)) {
+  ensureStyle();
+
+  const button = document.getElementById(BUTTON_ID) || createButton();
+  const target = findToolbar();
+
+  if (target?.toolbar && target.anchor) {
+    const anchorChild = directChildOf(target.toolbar, target.anchor);
+    button.classList.remove(FLOATING_CLASS);
+    button.classList.add(TOOLBAR_CLASS);
+    anchorChild.after(button);
     return true;
   }
 
-  ensureStyle();
-  const target = findToolbar();
-  if (!target?.toolbar) {
-    return false;
+  if (!button.isConnected) {
+    button.classList.remove(TOOLBAR_CLASS);
+    button.classList.add(FLOATING_CLASS);
+    document.body.appendChild(button);
   }
 
-  const button = createButton();
-  const firstVisibleChild = [...target.toolbar.children].find(isVisible);
-  if (firstVisibleChild) {
-    target.toolbar.insertBefore(button, firstVisibleChild);
-  } else {
-    target.toolbar.appendChild(button);
-  }
-  return true;
+  return false;
 }
 
 function installToolbarButton() {
@@ -155,20 +205,17 @@ function installToolbarButton() {
   tryInsert();
 
   const observer = new MutationObserver(() => {
-    if (!document.getElementById(BUTTON_ID)) {
+    const button = document.getElementById(BUTTON_ID);
+    if (!button || !button.isConnected || button.classList.contains(FLOATING_CLASS)) {
       insertButton();
     }
   });
   observer.observe(document.body, { childList: true, subtree: true });
 }
 
-if (app?.registerExtension) {
-  app.registerExtension({
-    name: "ComfyUI.CreditTracker.ToolbarButton",
-    setup() {
-      installToolbarButton();
-    },
-  });
-} else {
-  window.addEventListener("DOMContentLoaded", installToolbarButton, { once: true });
-}
+app.registerExtension({
+  name: "ComfyUI.CreditTracker.ToolbarButton",
+  setup() {
+    installToolbarButton();
+  },
+});

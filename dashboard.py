@@ -5,7 +5,7 @@ import io
 import json
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -63,6 +63,7 @@ BALANCE_CACHE_TTL_SECONDS = 10
 STATUS_PATH = Path(__file__).resolve().parent / "tracker_status.json"
 BACKUP_DIR = Path(__file__).resolve().parent / "backups"
 BACKUP_INTERVAL_SECONDS = 24 * 60 * 60
+LOCAL_DATE_SQL = "CASE WHEN timestamp IS NOT NULL AND length(timestamp) >= 10 THEN substr(timestamp, 1, 10) ELSE date(timestamp) END"
 BALANCE_CACHE: dict[str, Any] = {
     "ts": 0.0,
     "data": {
@@ -83,6 +84,74 @@ def _connect() -> sqlite3.Connection:
     return connection
 
 
+def _clean_date(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    candidate = text[:10]
+    try:
+        datetime.strptime(candidate, "%Y-%m-%d")
+    except ValueError:
+        return ""
+    return candidate
+
+
+def _date_filter_bounds(params: dict[str, str]) -> tuple[str, str]:
+    exact_day = _clean_date(params.get("day") or params.get("date"))
+    if exact_day:
+        return exact_day, exact_day
+
+    date_from = _clean_date(params.get("from"))
+    date_to = _clean_date(params.get("to"))
+    if date_from and date_to and date_from > date_to:
+        date_from, date_to = date_to, date_from
+    if date_from or date_to:
+        return date_from, date_to
+
+    days = str(params.get("days") or "").strip()
+    if days:
+        try:
+            days_int = max(1, min(int(days), 3650))
+        except ValueError:
+            return "", ""
+        today = datetime.now().astimezone().date()
+        start = today - timedelta(days=days_int - 1)
+        return start.isoformat(), today.isoformat()
+
+    return "", ""
+
+
+def _date_filter_payload(params: dict[str, str]) -> dict[str, Any]:
+    date_from, date_to = _date_filter_bounds(params)
+    exact_day = date_from if date_from and date_from == date_to else ""
+    days = str(params.get("days") or "").strip()
+    if exact_day:
+        label = exact_day
+    elif date_from and date_to:
+        label = f"{date_from} to {date_to}"
+    elif date_from:
+        label = f"From {date_from}"
+    elif date_to:
+        label = f"Through {date_to}"
+    elif days:
+        label = f"Last {days} day{'s' if days != '1' else ''}"
+    else:
+        label = "All time"
+    return {
+        "from": date_from,
+        "to": date_to,
+        "single_day": exact_day,
+        "label": label,
+    }
+
+
+def _local_day_from_timestamp(timestamp: Any) -> str:
+    text = str(timestamp or "").strip()
+    if len(text) >= 10:
+        return text[:10]
+    return _clean_date(text)
+
+
 def _query_filters(params: dict[str, str]) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     values: list[Any] = []
@@ -90,9 +159,7 @@ def _query_filters(params: dict[str, str]) -> tuple[str, list[Any]]:
     project = params.get("project", "").strip()
     partner = params.get("partner", "").strip()
     source = params.get("source", "").strip()
-    days = params.get("days", "").strip()
-    date_from = params.get("from", "").strip()
-    date_to = params.get("to", "").strip()
+    date_from, date_to = _date_filter_bounds(params)
     timestamp_from = params.get("from_ts", "").strip()
     timestamp_to = params.get("to_ts", "").strip()
     include_failed = params.get("include_failed", "").strip() == "1"
@@ -107,10 +174,10 @@ def _query_filters(params: dict[str, str]) -> tuple[str, list[Any]]:
         clauses.append("source = ?")
         values.append(source)
     if date_from:
-        clauses.append("date(timestamp) >= date(?)")
+        clauses.append(f"{LOCAL_DATE_SQL} >= ?")
         values.append(date_from)
     if date_to:
-        clauses.append("date(timestamp) <= date(?)")
+        clauses.append(f"{LOCAL_DATE_SQL} <= ?")
         values.append(date_to)
     if timestamp_from:
         clauses.append("timestamp >= ?")
@@ -118,13 +185,6 @@ def _query_filters(params: dict[str, str]) -> tuple[str, list[Any]]:
     if timestamp_to:
         clauses.append("timestamp <= ?")
         values.append(timestamp_to)
-    if days and not date_from and not date_to:
-        try:
-            days_int = max(1, min(int(days), 3650))
-            clauses.append("datetime(timestamp) >= datetime('now', ?)")
-            values.append(f"-{days_int} days")
-        except ValueError:
-            pass
     if not include_failed:
         clauses.append(
             "("
@@ -327,23 +387,14 @@ def _tracker_status_payload() -> dict[str, Any]:
 def _balance_snapshot_summary_for_filters(params: dict[str, str]) -> dict[str, Any]:
     clauses: list[str] = []
     values: list[Any] = []
-    date_from = params.get("from", "").strip()
-    date_to = params.get("to", "").strip()
-    days = params.get("days", "").strip()
+    date_from, date_to = _date_filter_bounds(params)
 
     if date_from:
-        clauses.append("date(timestamp) >= date(?)")
+        clauses.append(f"{LOCAL_DATE_SQL} >= ?")
         values.append(date_from)
     if date_to:
-        clauses.append("date(timestamp) <= date(?)")
+        clauses.append(f"{LOCAL_DATE_SQL} <= ?")
         values.append(date_to)
-    if days and not date_from and not date_to:
-        try:
-            days_int = max(1, min(int(days), 3650))
-            clauses.append("datetime(timestamp) >= datetime('now', ?)")
-            values.append(f"-{days_int} days")
-        except ValueError:
-            pass
 
     if not clauses:
         return balance_snapshot_summary(DB_PATH)
@@ -783,12 +834,20 @@ def _dedupe_usage_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _filter_rows_by_timestamp_window(rows: list[dict[str, Any]], params: dict[str, str]) -> list[dict[str, Any]]:
     timestamp_from = str(params.get("from_ts") or "").strip()
     timestamp_to = str(params.get("to_ts") or "").strip()
-    if not timestamp_from and not timestamp_to:
+    date_from, date_to = _date_filter_bounds(params)
+    if not timestamp_from and not timestamp_to and not date_from and not date_to:
         return rows
 
     filtered: list[dict[str, Any]] = []
     for row in rows:
         timestamp = str(row.get("timestamp") or "").strip()
+        local_day = _local_day_from_timestamp(timestamp)
+        if (date_from or date_to) and not local_day:
+            continue
+        if date_from and local_day and local_day < date_from:
+            continue
+        if date_to and local_day and local_day > date_to:
+            continue
         if timestamp_from and timestamp < timestamp_from:
             continue
         if timestamp_to and timestamp > timestamp_to:
@@ -863,6 +922,36 @@ def _group_usage_rows(rows: list[dict[str, Any]], group_key: str, limit: int) ->
         grouped.values(),
         key=lambda row: (-_safe_float(row.get("total_estimated_credits"), 0.0), -int(row.get("total_runs") or 0), str(row.get(group_key, ""))),
     )[:limit]
+
+
+def _group_usage_rows_by_day(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        day = _local_day_from_timestamp(row.get("timestamp"))
+        if not day:
+            day = "Unknown"
+        target = grouped.setdefault(
+            day,
+            {
+                "day": day,
+                "total_runs": 0,
+                "total_quantity": 0.0,
+                "total_duration_seconds": 0.0,
+                "total_estimated_credits": 0.0,
+                "total_estimated_usd": 0.0,
+            },
+        )
+        target["total_runs"] += 1
+        target["total_quantity"] += _safe_float(row.get("quantity"), 0.0)
+        target["total_duration_seconds"] += _safe_float(row.get("duration_seconds"), 0.0)
+        target["total_estimated_credits"] += _safe_float(row.get("estimated_credits"), 0.0)
+        target["total_estimated_usd"] += _safe_float(row.get("estimated_usd"), 0.0)
+
+    for row in grouped.values():
+        for key in ("total_quantity", "total_duration_seconds", "total_estimated_credits", "total_estimated_usd"):
+            row[key] = round(_safe_float(row.get(key), 0.0), 4)
+
+    return sorted(grouped.values(), key=lambda row: str(row.get("day") or ""))
 
 
 def _model_label(row: dict[str, Any]) -> str:
@@ -1026,6 +1115,7 @@ def _federated_payload(local_payload: dict[str, Any], params: dict[str, str], li
         "by_partner": _group_usage_rows(deduped_usage_rows, "partner_node_name", limit),
         "by_project": _group_usage_rows(deduped_usage_rows, "project_name", limit),
         "by_model": _group_usage_rows_by_model(deduped_usage_rows, limit),
+        "daily": _group_usage_rows_by_day(deduped_usage_rows),
         "expensive": sorted(deduped_usage_rows, key=lambda row: (_safe_float(row.get("estimated_credits"), 0.0), str(row.get("timestamp") or "")), reverse=True)[:limit],
         "recent": recent_rows,
         "remotes": remote_payloads,
@@ -1160,13 +1250,15 @@ def _summary_payload(params: dict[str, str]) -> dict[str, Any]:
         daily = connection.execute(
             f"""
             SELECT
-                date(timestamp) AS day,
+                {LOCAL_DATE_SQL} AS day,
                 COUNT(*) AS total_runs,
+                ROUND(COALESCE(SUM(quantity), 0), 4) AS total_quantity,
+                ROUND(COALESCE(SUM(duration_seconds), 0), 4) AS total_duration_seconds,
                 ROUND(COALESCE(SUM(estimated_credits), 0), 4) AS total_estimated_credits,
                 ROUND(COALESCE(SUM(estimated_usd), 0), 4) AS total_estimated_usd
             FROM credit_usage
             {where_sql}
-            GROUP BY date(timestamp)
+            GROUP BY {LOCAL_DATE_SQL}
             ORDER BY day ASC
             """,
             values,
@@ -1253,6 +1345,7 @@ def _summary_payload(params: dict[str, str]) -> dict[str, Any]:
         "credits_per_usd": CREDITS_PER_USD,
         "database": str(Path(DB_PATH).resolve()),
         "filters": dict(params),
+        "date_range": _date_filter_payload(params),
         "filter_options": filter_options,
         "pricing_cache": {
             key: value
@@ -1526,6 +1619,8 @@ def _dashboard_html() -> str:
     .export-options a { color: #121827; text-decoration: none; padding: 9px 10px; border-radius: 6px; font-size: 14px; }
     .export-options a:hover { background: #f1f5fb; }
     .filter-bar { display: grid; grid-template-columns: minmax(150px, 180px) minmax(260px, auto) minmax(160px, 1fr) minmax(190px, 1.2fr) minmax(150px, 180px) 90px 92px; gap: 10px; align-items: end; }
+    .range-inputs { display: grid; }
+    .range-inputs[hidden] { display: none; }
     .custom-range { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .custom-range[hidden] { display: none; }
     .cards, .grid { display: grid; gap: 16px; }
@@ -1587,6 +1682,10 @@ def _dashboard_html() -> str:
     code { font-family: Consolas, monospace; font-size: 12px; color: #526177; }
     .wide { grid-column: 1 / -1; }
     .chart { width: 100%; height: 240px; display: block; }
+    .daily-summary { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 12px; padding: 18px; border-bottom: 1px solid #edf1f6; }
+    .daily-summary-item { border: 1px solid #e2e8f0; border-radius: 7px; padding: 12px; background: #fbfdff; }
+    .daily-summary-item span { display: block; color: #64748b; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }
+    .daily-summary-item strong { display: block; font-size: 24px; line-height: 1.1; font-weight: 900; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
     .truncate { position: relative; display: inline-block; max-width: 100%; cursor: help; overflow: visible; }
     .truncate:hover::after { content: attr(data-full); position: absolute; left: 0; top: 120%; z-index: 50; max-width: 460px; min-width: 180px; padding: 8px 10px; color: #fff; background: #111827; border-radius: 6px; box-shadow: 0 12px 30px rgba(15, 23, 42, .24); white-space: normal; overflow-wrap: anywhere; font-family: Inter, Segoe UI, Arial, sans-serif; font-size: 12px; line-height: 1.35; }
     .share-layout { display: grid; grid-template-columns: minmax(280px, 420px) 1fr; gap: 18px; align-items: center; padding: 18px; }
@@ -1628,7 +1727,7 @@ def _dashboard_html() -> str:
     details.collapsible-section summary::after { content: "+"; float: right; color: #276fe0; font-weight: 900; }
     details.collapsible-section[open] summary { border-bottom-color: #dbe3ef; }
     details.collapsible-section[open] summary::after { content: "-"; }
-    @media (max-width: 1100px) { .header-row, .filter-bar, .cards, .grid, .share-layout, .reconcile, .health-grid, .project-summary, .project-body { grid-template-columns: 1fr; display: grid; } .header-actions { justify-content: start; } .share-row { grid-template-columns: 14px minmax(120px, 1fr) 80px 90px; } .share-budget { display: none; } header { position: static; } }
+    @media (max-width: 1100px) { .header-row, .filter-bar, .cards, .grid, .share-layout, .reconcile, .health-grid, .project-summary, .project-body, .daily-summary { grid-template-columns: 1fr; display: grid; } .header-actions { justify-content: start; } .share-row { grid-template-columns: 14px minmax(120px, 1fr) 80px 90px; } .share-budget { display: none; } header { position: static; } }
   </style>
 </head>
 <body>
@@ -1657,15 +1756,19 @@ def _dashboard_html() -> str:
         <select id="dateRange" onchange="handleDateRangeChange()">
           <option value="all">All Time</option>
           <option value="today">Today</option>
+          <option value="day">Specific Day</option>
           <option value="7">Last 7 Days</option>
           <option value="30">Last 30 Days</option>
           <option value="month">This Month</option>
           <option value="custom">Custom Range...</option>
         </select>
       </label>
-      <div class="custom-range" id="customRange" hidden>
-        <label>From <input id="from" type="date"></label>
-        <label>To <input id="to" type="date"></label>
+      <div class="range-inputs" id="rangeInputs" hidden>
+        <label id="singleDayField" hidden>Day <input id="day" type="date" onchange="loadData()"></label>
+        <div class="custom-range" id="customRange" hidden>
+          <label>From <input id="from" type="date" onchange="loadData()"></label>
+          <label>To <input id="to" type="date" onchange="loadData()"></label>
+        </div>
       </div>
       <label>Project <select id="project" onchange="loadData()"><option value="">All projects</option></select></label>
       <label>Partner Node <select id="partner" onchange="loadData()"><option value="">All nodes</option></select></label>
@@ -1726,6 +1829,7 @@ def _dashboard_html() -> str:
         <div class="health-grid" id="healthGrid"></div>
       </section>
       <section class="wide"><h2>Credits Over Time</h2><canvas class="chart" id="dailyChart"></canvas></section>
+      <section class="wide"><div class="section-head"><h2>Daily Breakdown</h2><span class="badge" id="dailyRangeBadge">All Time</span></div><div class="status-line" id="dailyStatus">Select a date range to review daily spend.</div><div class="daily-summary" id="dailySummary"></div><table id="dailyBreakdown"></table></section>
       <section class="wide"><h2>Spend Share by Partner Node</h2><div class="share-layout"><canvas class="share-chart" id="partnerShareChart"></canvas><div class="share-legend" id="partnerShareLegend"></div></div></section>
       <section class="wide"><h2>Balance Reconciliation</h2><div class="status-line" id="balanceReconciliationStatus">Waiting for balance snapshots</div><div class="reconcile" id="balanceReconciliation"></div></section>
       <section class="wide"><h2>Federated Instances</h2><div class="status-line" id="federatedStatus">Reading local tracker only</div><table id="instances"></table></section>
@@ -1752,18 +1856,32 @@ def _dashboard_html() -> str:
     let showAllRecent = false;
     let showAllNetworkRecent = false;
     let showAllExpensive = false;
+    function localDateValue(date = new Date()) {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
+    }
     function params() {
       const q = new URLSearchParams();
       const range = document.getElementById("dateRange").value;
-      const today = new Date().toISOString().slice(0, 10);
+      const today = localDateValue();
       if (range === "today") {
+        q.set("day", today);
         q.set("from", today);
         q.set("to", today);
+      } else if (range === "day") {
+        const day = document.getElementById("day").value.trim();
+        if (day) {
+          q.set("day", day);
+          q.set("from", day);
+          q.set("to", day);
+        }
       } else if (range === "7" || range === "30") {
         q.set("days", range);
       } else if (range === "month") {
         const now = new Date();
-        q.set("from", new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10));
+        q.set("from", localDateValue(new Date(now.getFullYear(), now.getMonth(), 1)));
         q.set("to", today);
       } else if (range === "custom") {
         for (const id of ["from", "to"]) {
@@ -1778,7 +1896,13 @@ def _dashboard_html() -> str:
       return q;
     }
     function handleDateRangeChange() {
-      document.getElementById("customRange").hidden = document.getElementById("dateRange").value !== "custom";
+      const range = document.getElementById("dateRange").value;
+      document.getElementById("rangeInputs").hidden = range !== "day" && range !== "custom";
+      document.getElementById("singleDayField").hidden = range !== "day";
+      document.getElementById("customRange").hidden = range !== "custom";
+      if (range === "day" && !document.getElementById("day").value) {
+        document.getElementById("day").value = localDateValue();
+      }
       loadData();
     }
     function toggleExportMenu(event) {
@@ -1841,7 +1965,7 @@ def _dashboard_html() -> str:
       const pad = { left: 54, right: 22, top: 20, bottom: 42 };
       const w = rect.width - pad.left - pad.right;
       const h = rect.height - pad.top - pad.bottom;
-      if (!rows.length || rows.length < 2) {
+      if (!rows.length) {
         const cx = rect.width / 2;
         const cy = rect.height / 2 - 4;
         ctx.strokeStyle = "#b8c7da";
@@ -1862,7 +1986,33 @@ def _dashboard_html() -> str:
         ctx.fillStyle = "#526177";
         ctx.font = "600 14px Segoe UI, Arial";
         ctx.textAlign = "center";
-        ctx.fillText("Not enough data in this time range to display a trend.", cx, cy + 62);
+        ctx.fillText("No credit usage recorded in this date range.", cx, cy + 62);
+        ctx.textAlign = "left";
+        return;
+      }
+      if (rows.length === 1) {
+        const row = rows[0];
+        const credits = Number(row.total_estimated_credits || 0);
+        const usd = Number(row.total_estimated_usd || 0);
+        const cx = rect.width / 2;
+        const base = pad.top + h;
+        const barHeight = Math.max(14, h * 0.72);
+        ctx.strokeStyle = "#dbe3ef";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, pad.top);
+        ctx.lineTo(pad.left, base);
+        ctx.lineTo(pad.left + w, base);
+        ctx.stroke();
+        ctx.fillStyle = "#276fe0";
+        ctx.fillRect(cx - 24, base - barHeight, 48, barHeight);
+        ctx.fillStyle = "#121827";
+        ctx.font = "700 18px Segoe UI, Arial";
+        ctx.textAlign = "center";
+        ctx.fillText(`${fmt.format(credits)} credits`, cx, base - barHeight - 18);
+        ctx.fillStyle = "#526177";
+        ctx.font = "12px Segoe UI, Arial";
+        ctx.fillText(`${row.day || ""} | ${money.format(usd)}`, cx, rect.height - 16);
         ctx.textAlign = "left";
         return;
       }
@@ -1912,6 +2062,39 @@ def _dashboard_html() -> str:
       ctx.textAlign = "right";
       ctx.fillText(last, pad.left + w, rect.height - 16);
       ctx.textAlign = "left";
+    }
+    function renderDailyBreakdown(data) {
+      const source = data?.federated || data || {};
+      const rows = source.daily || data?.daily || [];
+      const totals = source.totals || data?.totals || {};
+      const range = data?.date_range || {};
+      const badge = document.getElementById("dailyRangeBadge");
+      const status = document.getElementById("dailyStatus");
+      const summary = document.getElementById("dailySummary");
+      const totalRuns = Number(totals.total_runs || 0);
+      const totalCredits = Number(totals.total_estimated_credits || 0);
+      const totalUsd = Number(totals.total_estimated_usd || 0);
+      const avgUsd = totalRuns ? totalUsd / totalRuns : 0;
+      const sortedRows = [...rows].sort((a, b) => String(b.day || "").localeCompare(String(a.day || "")));
+
+      badge.textContent = range.single_day ? "Specific Day" : (range.label || "All Time");
+      badge.className = `badge ${range.single_day ? "online" : ""}`;
+      if (range.single_day) {
+        status.innerHTML = `Daily total for <strong>${esc(range.single_day)}</strong>: <strong>${fmt.format(totalCredits)}</strong> credits / <strong>${money.format(totalUsd)}</strong> across <strong>${fmt.format(totalRuns)}</strong> run(s).`;
+      } else {
+        status.innerHTML = `Daily spend grouped by stored local calendar date. Active range: <strong>${esc(range.label || "All time")}</strong>.`;
+      }
+      summary.innerHTML = `
+        <div class="daily-summary-item"><span>Total Days</span><strong>${fmt.format(rows.length)}</strong></div>
+        <div class="daily-summary-item"><span>Total Runs</span><strong>${fmt.format(totalRuns)}</strong></div>
+        <div class="daily-summary-item"><span>Credits Spent</span><strong>${fmt.format(totalCredits)}</strong></div>
+        <div class="daily-summary-item"><span>USD Spent</span><strong>${money.format(totalUsd)}<small style="display:block;margin-top:6px;color:#526177;font-size:12px;">${money.format(avgUsd)} / run</small></strong></div>
+      `;
+      table("dailyBreakdown", ["Date", "Runs", "Credits", "USD", "Avg / Run"], sortedRows, r => {
+        const runs = Number(r.total_runs || 0);
+        const usd = Number(r.total_estimated_usd || 0);
+        return `<tr><td>${esc(r.day || "-")}</td><td class="num">${fmt.format(runs)}</td><td class="num">${fmt.format(r.total_estimated_credits || 0)}</td><td class="num">${money.format(usd)}</td><td class="num">${money.format(runs ? usd / runs : 0)}</td></tr>`;
+      });
     }
     function partnerShareRows(rows) {
       const ranked = (rows || [])
@@ -2290,7 +2473,9 @@ def _dashboard_html() -> str:
       document.getElementById("fullCsv").href = `/credit-tracker/export/full.csv?${q}`;
       document.getElementById("nodeCsv").href = `/credit-tracker/export/by-node.csv?${q}`;
       document.getElementById("projectCsv").href = `/credit-tracker/export/by-project.csv?${q}`;
-      drawDailyChart(data.daily || []);
+      const dailySource = data.federated || data;
+      drawDailyChart(dailySource.daily || data.daily || []);
+      renderDailyBreakdown(data);
       renderHealth(data.health || {});
       renderPartnerShare(data.by_partner || data.by_node || [], Number(data.totals.total_estimated_credits || 0), balance);
       renderBalanceReconciliation(data.balance_reconciliation || {});

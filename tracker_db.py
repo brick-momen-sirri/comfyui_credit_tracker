@@ -379,34 +379,40 @@ def record_balance_snapshot(
     return True
 
 
-def balance_snapshot_summary(db_path: Path = DB_PATH) -> dict[str, Any]:
-    initialize_database(db_path)
-    with sqlite3.connect(db_path, timeout=30) as connection:
-        connection.row_factory = sqlite3.Row
-        first = connection.execute(
-            """
-            SELECT *
-            FROM balance_snapshots
-            ORDER BY timestamp ASC, id ASC
-            LIMIT 1
-            """
-        ).fetchone()
-        latest = connection.execute(
-            """
-            SELECT *
-            FROM balance_snapshots
-            ORDER BY timestamp DESC, id DESC
-            LIMIT 1
-            """
-        ).fetchone()
-        count = connection.execute("SELECT COUNT(*) FROM balance_snapshots").fetchone()[0]
-
-    if not first or not latest:
+def balance_snapshot_movement_summary(
+    rows: list[Any],
+    *,
+    empty_message: str = "No balance snapshots yet",
+) -> dict[str, Any]:
+    """Summarize balance snapshots while accounting for top-ups or adjustments."""
+    count = len(rows)
+    if not rows:
         return {
             "ok": False,
-            "snapshot_count": int(count or 0),
-            "message": "No balance snapshots yet",
+            "snapshot_count": 0,
+            "message": empty_message,
         }
+
+    first = rows[0]
+    latest = rows[-1]
+    added_credits = 0.0
+    added_usd = 0.0
+    consumed_credits = 0.0
+    consumed_usd = 0.0
+    previous = None
+    for row in rows:
+        if previous is not None:
+            delta_credits = _safe_float(row["credits"], 0.0) - _safe_float(previous["credits"], 0.0)
+            delta_usd = _safe_float(row["usd"], 0.0) - _safe_float(previous["usd"], 0.0)
+            if delta_credits > 0:
+                added_credits += delta_credits
+            elif delta_credits < 0:
+                consumed_credits += abs(delta_credits)
+            if delta_usd > 0:
+                added_usd += delta_usd
+            elif delta_usd < 0:
+                consumed_usd += abs(delta_usd)
+        previous = row
 
     first_credits = _safe_float(first["credits"], 0.0)
     latest_credits = _safe_float(latest["credits"], 0.0)
@@ -422,10 +428,29 @@ def balance_snapshot_summary(db_path: Path = DB_PATH) -> dict[str, Any]:
         "latest": dict(latest),
         "balance_delta_credits": delta_credits,
         "balance_delta_usd": delta_usd,
-        "real_consumed_credits": max(delta_credits, 0.0),
-        "real_consumed_usd": max(delta_usd, 0.0),
+        "balance_added_credits": round(added_credits, 4),
+        "balance_added_usd": round(added_usd, 4),
+        "real_consumed_credits": round(consumed_credits, 4),
+        "real_consumed_usd": round(consumed_usd, 4),
         "balance_increased": latest_credits > first_credits,
+        "has_balance_additions": added_credits > 0 or added_usd > 0,
+        "reconciliation_method": "adjacent_snapshot_drops",
     }
+
+
+def balance_snapshot_summary(db_path: Path = DB_PATH) -> dict[str, Any]:
+    initialize_database(db_path)
+    with sqlite3.connect(db_path, timeout=30) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM balance_snapshots
+            ORDER BY timestamp ASC, id ASC
+            """
+        ).fetchall()
+
+    return balance_snapshot_movement_summary(rows)
 
 
 def _find_pricing_entry(

@@ -21,12 +21,12 @@ except Exception:
     PromptServer = None
 
 try:
-    from .tracker_db import CREDITS_PER_USD, DB_PATH, LOGGER, UsageRecord, balance_snapshot_summary, initialize_database, insert_usage_record, make_dedupe_key, record_balance_snapshot
+    from .tracker_db import CREDITS_PER_USD, DB_PATH, LOGGER, UsageRecord, balance_snapshot_movement_summary, balance_snapshot_summary, initialize_database, insert_usage_record, make_dedupe_key, record_balance_snapshot
     from .pricing_sync import load_pricing_cache, search_pricing_cache, sync_pricing_cache
     from .official_usage import official_usage_summary, remember_auth_headers, sync_official_usage_events
     from .peer_sync import PEER_SYNC_TOKEN
 except ImportError:
-    from tracker_db import CREDITS_PER_USD, DB_PATH, LOGGER, UsageRecord, balance_snapshot_summary, initialize_database, insert_usage_record, make_dedupe_key, record_balance_snapshot
+    from tracker_db import CREDITS_PER_USD, DB_PATH, LOGGER, UsageRecord, balance_snapshot_movement_summary, balance_snapshot_summary, initialize_database, insert_usage_record, make_dedupe_key, record_balance_snapshot
     from pricing_sync import load_pricing_cache, search_pricing_cache, sync_pricing_cache
     from official_usage import official_usage_summary, remember_auth_headers, sync_official_usage_events
     from peer_sync import PEER_SYNC_TOKEN
@@ -189,6 +189,7 @@ def _query_filters(params: dict[str, str]) -> tuple[str, list[Any]]:
         clauses.append(
             "("
             "source = 'runtime_price' "
+            "OR source = 'official_usage_recovery' "
             "OR notes LIKE '%status=execution_success%' "
             "OR notes NOT LIKE '%status=execution_error%'"
             ")"
@@ -401,55 +402,17 @@ def _balance_snapshot_summary_for_filters(params: dict[str, str]) -> dict[str, A
 
     where_sql = "WHERE " + " AND ".join(clauses)
     with _connect() as connection:
-        first = connection.execute(
+        rows = connection.execute(
             f"""
             SELECT *
             FROM balance_snapshots
             {where_sql}
             ORDER BY timestamp ASC, id ASC
-            LIMIT 1
             """,
             values,
-        ).fetchone()
-        latest = connection.execute(
-            f"""
-            SELECT *
-            FROM balance_snapshots
-            {where_sql}
-            ORDER BY timestamp DESC, id DESC
-            LIMIT 1
-            """,
-            values,
-        ).fetchone()
-        count = connection.execute(
-            f"SELECT COUNT(*) FROM balance_snapshots {where_sql}",
-            values,
-        ).fetchone()[0]
+        ).fetchall()
 
-    if not first or not latest:
-        return {
-            "ok": False,
-            "snapshot_count": int(count or 0),
-            "message": "No balance snapshots for this date range",
-        }
-
-    first_credits = _safe_float(first["credits"], 0.0)
-    latest_credits = _safe_float(latest["credits"], 0.0)
-    first_usd = _safe_float(first["usd"], 0.0)
-    latest_usd = _safe_float(latest["usd"], 0.0)
-    delta_credits = round(first_credits - latest_credits, 4)
-    delta_usd = round(first_usd - latest_usd, 4)
-    return {
-        "ok": True,
-        "snapshot_count": int(count or 0),
-        "first": dict(first),
-        "latest": dict(latest),
-        "balance_delta_credits": delta_credits,
-        "balance_delta_usd": delta_usd,
-        "real_consumed_credits": max(delta_credits, 0.0),
-        "real_consumed_usd": max(delta_usd, 0.0),
-        "balance_increased": latest_credits > first_credits,
-    }
+    return balance_snapshot_movement_summary(rows, empty_message="No balance snapshots for this date range")
 
 
 def _balance_reconciliation_payload(
@@ -2310,17 +2273,19 @@ def _dashboard_html() -> str:
       const first = reconciliation.first || {};
       const latest = reconciliation.latest || {};
       const realConsumed = Number(reconciliation.real_consumed_credits || 0);
+      const added = Number(reconciliation.balance_added_credits || 0);
       const tracked = Number(reconciliation.tracked_credits || 0);
       const gap = Number(reconciliation.untracked_credits || 0);
       const possibleUntracked = Math.max(gap, 0);
       const gapIsWarning = gap > 1;
       status.classList.toggle("error", gapIsWarning);
-      let direction = reconciliation.balance_increased ? "Balance increased since first snapshot, likely because credits were purchased or the snapshot window restarted." : "Real consumed is calculated from first snapshot balance minus latest snapshot balance.";
-      if (gap < -1) direction = "Tracker estimate is higher than balance-snapshot consumption because some tracked rows happened before the first saved balance snapshot.";
+      let direction = added > 0 ? `Real consumed is summed from balance drops; positive balance changes/top-ups add ${fmt.format(added)} credits.` : "Real consumed is calculated from balance drops between saved snapshots.";
+      if (gap < -1) direction = "Tracker estimate is higher than balance-snapshot consumption in this snapshot window.";
       status.innerHTML = `Snapshots: <strong>${fmt.format(reconciliation.snapshot_count || 0)}</strong> | First: <strong>${esc(first.timestamp || "-")}</strong> | Latest: <strong>${esc(latest.timestamp || "-")}</strong> | ${esc(direction)}`;
       container.innerHTML = `
         <div class="reconcile-item"><span>Starting Balance</span><strong>${fmt.format(first.credits || 0)}</strong></div>
         <div class="reconcile-item"><span>Current Balance</span><strong>${fmt.format(latest.credits || 0)}</strong></div>
+        <div class="reconcile-item"><span>Credits Added</span><strong>${fmt.format(added)}</strong></div>
         <div class="reconcile-item"><span>Real Consumed</span><strong>${fmt.format(realConsumed)}</strong></div>
         <div class="reconcile-item"><span>Tracker Estimate</span><strong>${fmt.format(tracked)}</strong></div>
         <div class="reconcile-item ${gapIsWarning ? "warning" : ""}"><span>Possible Untracked</span><strong>${fmt.format(possibleUntracked)}</strong></div>
